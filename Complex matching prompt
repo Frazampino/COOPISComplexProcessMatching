@@ -8,7 +8,7 @@ def read_bpmn_file(file_path):
         return file.read()
 
 def extract_task_names(file_path):
-    """Estrae i nomi dei task da un file BPMN."""
+  
     tree = ET.parse(file_path)
     root = tree.getroot()
     ns = {'bpmn': 'http://www.omg.org/spec/BPMN/20100524/MODEL'}
