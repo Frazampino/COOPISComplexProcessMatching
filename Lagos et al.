@@ -1,123 +1,76 @@
+import ollama
+import os
 import xml.etree.ElementTree as ET
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from nltk.corpus import wordnet as wn
-from nltk.corpus import stopwords
-import nltk
 
-# Ensure NLTK resources are available
-nltk.download('wordnet')
-nltk.download('stopwords')
+def read_bpmn_file(file_path):
+    """Legge il contenuto XML di un file BPMN."""
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return file.read()
 
-# Function to extract activities from a BPMN file (XML)
-def extract_activities_from_bpmn(bpmn_file):
-    tree = ET.parse(bpmn_file)
+def extract_task_names(file_path):
+    """Estrae i nomi dei task da un file BPMN."""
+    tree = ET.parse(file_path)
     root = tree.getroot()
-    
-    namespaces = {'bpmn': 'http://www.omg.org/spec/BPMN/20100524/MODEL'}
-    
-    tasks = []
-    for task in root.findall(".//bpmn:task", namespaces):
-        task_name = task.get('name')
-        if task_name:
-            tasks.append(task_name.lower())  # Normalization
-    
-    return tasks
+    ns = {'bpmn': 'http://www.omg.org/spec/BPMN/20100524/MODEL'}
 
-# Function to preprocess activity names (semantic enrichment)
-def preprocess_with_semantics(activities):
-    enriched_activities = []
-    for activity in activities:
-        enriched_activity = activity
-        # Enhance with WordNet (find synonyms or related terms)
-        synsets = wn.synsets(activity)
-        if synsets:
-            # Take the first lemma (word) of the most common synset
-            enriched_activity = synsets[0].lemmas()[0].name().lower()
-        enriched_activities.append(enriched_activity)
+    task_names = []
+    for task_type in ['task', 'userTask', 'manualTask', 'serviceTask', 'scriptTask', 'businessRuleTask', 'sendTask', 'receiveTask', 'callActivity']:
+        for task in root.findall(f".//bpmn:{task_type}", ns):
+            name = task.attrib.get('name')
+            if name:
+                task_names.append(name)
+    return task_names
+
+def compare_bpmn_files(file1_path, file2_path):
+    """Confronta due modelli BPMN e stampa il risultato."""
+    name_1 = os.path.basename(file1_path)
+    name_2 = os.path.basename(file2_path)
+
+    content1 = read_bpmn_file(file1_path)
+    content2 = read_bpmn_file(file2_path)
+    tasks1 = extract_task_names(file1_path)
+    tasks2 = extract_task_names(file2_path)
+
+    prompt = f"""You are comparing two BPMN models. Here are their task names extracted from the BPMN files:
+
+Model 1 ({name_1}) task list:
+{chr(10).join(tasks1)}
+
+Model 2 ({name_2}) task list:
+{chr(10).join(tasks2)}
+
+Now, follow these steps:
+
+1. Provide a similarity score between 0 and 1 and explain briefly.
+2. Match tasks with similar or equivalent meaning (1:1 mappings) and explain.
+3. Identify 1:N mappings (single task to multiple tasks in the other model). Example:
+"Approve Order" → ["Check Order", "Confirm Order"]
+4. Identify N:M mappings (group of tasks to another group). Example:
+["Validate Data", "Clean Data"] → ["Preprocess", "Transform"]
+5. Explicitly say "No 1:N mappings found." or "No N:M mappings found." if not found.
+6. Provide the flattened list of mappings as:
+"Task A" → "Task B"
+"Task A" → "Task B1"
+["Task A1", "Task A2"] → ["Task B1", "Task B2"]
+"""
+
+    response = ollama.chat(model='llama3', messages=[{'role': 'user', 'content': prompt}])
     
-    return enriched_activities
-
-# Function to calculate similarity between activities from two BPMN files
-def calculate_similarity(bpmn1_activities, bpmn2_activities, threshold=0.6):
-    if not bpmn1_activities or not bpmn2_activities:
-        print("Error: One of the activity lists is empty!")
-        return []
     
-    vectorizer = TfidfVectorizer(stop_words='english')  # Stop words removed
-    combined_activities = bpmn1_activities + bpmn2_activities
-    tfidf_matrix = vectorizer.fit_transform(combined_activities)
-    similarity_matrix = cosine_similarity(tfidf_matrix)
-    
-    similar_pairs = []
-    num_bpmn1_activities = len(bpmn1_activities)
-    
-    for i in range(num_bpmn1_activities):
-        best_match = None
-        best_score = 0
-        
-        for j in range(num_bpmn1_activities, len(combined_activities)):
-            score = similarity_matrix[i][j]
-            if score >= threshold and score > best_score:
-                best_match = (bpmn1_activities[i], bpmn2_activities[j - num_bpmn1_activities], score)
-                best_score = score
-        
-        if best_match:
-            similar_pairs.append(best_match)
-    
-    return similar_pairs
+    print(f"\n=== Comparison: {name_1} vs {name_2} ===\n")
+    print(response['message']['content'])
+    print("\n" + "="*80 + "\n")
 
-# Function to calculate metrics (Precision, Recall, F1-Score)
-def evaluate_model(gold_standard, predicted_pairs):
-    predicted_set = set((a, b) for a, b, _ in predicted_pairs)
-    gold_standard_set = set(gold_standard)
-    
-    true_positives = len(predicted_set & gold_standard_set)
-    false_positives = len(predicted_set - gold_standard_set)
-    false_negatives = len(gold_standard_set - predicted_set)
-    
-    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+def batch_compare_bpmn_pairs(bpmn_pairs):
+    """Confronta una lista di coppie di file BPMN."""
+    for file1, file2 in bpmn_pairs:
+        try:
+            compare_bpmn_files(file1, file2)
+        except FileNotFoundError as e:
+            print(f"File non trovato: {e}")
 
-    return precision, recall, f1, true_positives, false_positives, false_negatives
 
-# Parsing two BPMN files and calculating similarity
-bpmn_file_1 = "Wuerzburg.bpmn"
-bpmn_file_2 = "FU_Berlin.bpmn"
-
-bpmn1_activities = extract_activities_from_bpmn(bpmn_file_1)
-bpmn2_activities = extract_activities_from_bpmn(bpmn_file_2)
-
-# Apply semantic preprocessing (using WordNet or domain-specific enhancements)
-bpmn1_activities_enriched = preprocess_with_semantics(bpmn1_activities)
-bpmn2_activities_enriched = preprocess_with_semantics(bpmn2_activities)
-
-print("Enriched Activities BPMN 1:", bpmn1_activities_enriched)
-print("Enriched Activities BPMN 2:", bpmn2_activities_enriched)
-
-# Calculate similarity using enhanced activity names
-predicted_pairs = calculate_similarity(bpmn1_activities_enriched, bpmn2_activities_enriched, threshold=0.6)
-
-# Example Gold Standard (can be adjusted based on real examples)
-gold_standard = [
-    ('send rejection', 'send rejection'),
-    ('send international application', 'send application'),
-    ('send german application', 'send application'),
-    ('receive rejection', 'receive rejection')
+bpmn_file_pairs = [
+    ('TU_Munich.bpmn', 'TU_Munich - Copia.bpmn')
 ]
-
-print("Gold Standard:", gold_standard)
-print("Predicted Pairs:", predicted_pairs)
-
-for pair in predicted_pairs:
-    print(f"Similar Pair: {pair[0]} <-> {pair[1]} (Sim: {pair[2]:.4f})")
-
-precision, recall, f1, tp, fp, fn = evaluate_model(gold_standard, predicted_pairs)
-
-print(f"Precision: {precision:.4f}")
-print(f"Recall: {recall:.4f}")
-print(f"F1-Score: {f1:.4f}")
-print(f"True Positives: {tp}")
-print(f"False Positives: {fp}")
-print(f"False Negatives: {fn}")
+batch_compare_bpmn_pairs(bpmn_file_pairs)
