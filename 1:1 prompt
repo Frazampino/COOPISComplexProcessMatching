@@ -1,0 +1,21 @@
+prompt = f"""Compare the following two BPMN models in XML format and assess their similarity:
+
+BPMN Model 1: {bpmn_file_1}
+BPMN Model 2: {bpmn_file_2}
+
+1. Provide a semantic similarity score from 0 to 1, where 0 means no similarity and 1 means perfect similarity, along with a brief explanation of the score.
+2. Identify one-to-one mappings between tasks in both models based on their semantic meaning. Provide the mapping in a list format (e.g., Task 1 in Model 1 -> Task A in Model 2).
+3. If gateways or other elements have significant differences, note them separately.
+
+Respond in a clear and structured format."""
+
+response = ollama.chat(model='llama3.1', messages=[
+    {
+        'role': 'user',
+        'content': prompt,
+    },
+])
+
+# Estrai il contenuto della risposta
+response_content = response['message']['content']
+print(f"Response:\n{response_content}")
