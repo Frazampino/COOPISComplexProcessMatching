@@ -1,0 +1,151 @@
+import ollama
+import os
+import re
+import ast
+import xml.etree.ElementTree as ET
+
+def extract_task_names(file_path):
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+    ns = {'bpmn': 'http://www.omg.org/spec/BPMN/20100524/MODEL'}
+    task_names = []
+    for task_type in ['task', 'userTask', 'manualTask', 'serviceTask', 'scriptTask', 'businessRuleTask', 'sendTask', 'receiveTask', 'callActivity']:
+        for task in root.findall(f".//bpmn:{task_type}", ns):
+            name = task.attrib.get('name')
+            if name:
+                task_names.append(name.strip())
+    return task_names
+
+def build_prompt(prompt_type, tasks1, tasks2, name1, name2):
+    list1 = '\n'.join(tasks1)
+    list2 = '\n'.join(tasks2)
+
+    common_instruction = f"""
+You are comparing two BPMN models. Here are their task names extracted from the BPMN files:
+
+Model 1 ({name1}) task list:
+{list1}
+
+Model 2 ({name2}) task list:
+{list2}
+
+⚠️ Please output all task mappings using **EXACTLY** the following format:
+- "Task A" → "Task B"
+- ["Task A1", "Task A2"] → ["Task B1", "Task B2"]
+Do not skip this format or rephrase it.
+"""
+
+    if prompt_type == 'A':
+        return common_instruction + "\nProvide a similarity score between 0 and 1 and explain briefly."
+
+    if prompt_type == 'B':
+        return common_instruction + "\nSteps:\n1. Provide similarity score and explanation.\n2. Match tasks with similar or equivalent meaning."
+
+    if prompt_type == 'C':
+        return common_instruction + """
+Steps:
+1. Provide a similarity score between 0 and 1 and explain briefly.
+2. Match tasks with similar or equivalent meaning (1:1 mappings).
+3. Identify 1:N mappings.
+4. Identify N:M mappings.
+5. If no such mappings exist, write: "No 1:N mappings found", "No N:M mappings found".
+6. Provide all mappings at the end using only the format shown above.
+"""
+
+def parse_llama_output(text):
+    pattern = re.compile(r'''
+        (?P<source>"[^"]*"|\[.*?\])\s*→\s*(?P<target>"[^"]*"|\[.*?\])
+    ''', re.VERBOSE)
+
+    mappings = []
+    for match in pattern.finditer(text):
+        raw_source = match.group("source")
+        raw_target = match.group("target")
+
+        try:
+            source = ast.literal_eval(raw_source)
+            if isinstance(source, str):
+                source = [source]
+        except:
+            source = [raw_source.strip('"').strip()]
+
+        try:
+            target = ast.literal_eval(raw_target)
+            if isinstance(target, str):
+                target = [target]
+        except:
+            target = [raw_target.strip('"').strip()]
+
+        source = sorted([s.lower().strip() for s in source])
+        target = sorted([t.lower().strip() for t in target])
+
+        mappings.append({"source": source, "target": target})
+
+    return mappings
+
+def compute_f1_score(predicted, gold):
+    pred_set = { (tuple(m['source']), tuple(m['target'])) for m in predicted }
+    gold_set = { (tuple(m['source']), tuple(m['target'])) for m in gold }
+
+    TP = len(pred_set & gold_set)
+    FP = len(pred_set - gold_set)
+    FN = len(gold_set - pred_set)
+
+    precision = TP / (TP + FP) if (TP + FP) else 0
+    recall = TP / (TP + FN) if (TP + FN) else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
+
+    return precision, recall, f1
+
+# GOLD STANDARD per Muenster.bpmn vs Muenster - Copia (1).bpmn
+GOLD_STANDARD = [
+    {"source": ["choose courses of studies"], "target": ["choose courses of studies"]},
+    {"source": ["complete online interview"], "target": ["complete online interview"]},
+    {"source": ["receive rejection for course of studies"], "target": ["receive rejection for course of studies"]},
+    {"source": ["print out and sign application form"], "target": ["print out and sign application form"]},
+    {"source": ["send application form and documents"], "target": ["send application form and documents"]},
+    {"source": ["take interview"], "target": ["take interview"]},
+    {"source": ["enrollment"], "target": ["enrollment"]},
+    {"source": ["mark applicant as not suitable"], "target": ["mark applicant as not suitable"]},
+    {"source": ["mark applicant as qualified"], "target": ["mark applicant as qualified"]},
+    {"source": ["accept applicant"], "target": ["accept applicant"]},
+    {"source": ["send information to application office"], "target": ["send information to application office"]},
+    {"source": ["update application system"], "target": ["update application system"]},
+    {"source": ["send acceptance"], "target": ["send acceptance"]},
+    {"source": ["send rejection"], "target": ["send rejection"]},
+    {"source": ["check application complete"], "target": ["check application complete"]},
+    {"source": ["update status of application"], "target": ["update status of application"]},
+    {"source": ["upload bachelor's degree / transcript of records / diploma"], "target": ["upload language certificate", "upload all the required documents"]}
+]
+
+# Normalizza i nomi nel gold standard
+for m in GOLD_STANDARD:
+    m["source"] = sorted([s.lower().strip() for s in m["source"]])
+    m["target"] = sorted([t.lower().strip() for t in m["target"]])
+
+def run_ablation(file1, file2):
+    name1 = os.path.basename(file1)
+    name2 = os.path.basename(file2)
+
+    tasks1 = extract_task_names(file1)
+    tasks2 = extract_task_names(file2)
+
+    for prompt_type in ['A', 'B', 'C']:
+        prompt = build_prompt(prompt_type, tasks1, tasks2, name1, name2)
+        print(f"\n🧪 Prompt {prompt_type} - invio a modello...")
+        response = ollama.chat(model='llama3', messages=[{'role': 'user', 'content': prompt}])
+        output_text = response['message']['content']
+
+        parsed = parse_llama_output(output_text)
+        print(f"🧾 Parsed mappings: {parsed}")
+
+        precision, recall, f1 = compute_f1_score(parsed, GOLD_STANDARD)
+        print(f"--- Risultati Prompt {prompt_type} ---")
+        print(f"Precision: {precision:.2f}")
+        print(f"Recall:    {recall:.2f}")
+        print(f"F1 Score:  {f1:.2f}")
+        print(f"Output modello (inizio):\n{output_text[:500]}")
+        print("=" * 60)
+
+if __name__ == "__main__":
+    run_ablation('Muenster.bpmn', 'Muenster - Copia (1).bpmn')
